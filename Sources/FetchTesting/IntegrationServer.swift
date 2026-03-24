@@ -1,5 +1,11 @@
 import Foundation
 
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
+
 public struct IntegrationServerConfiguration: Sendable {
   public var pythonExecutable: String
   public var startupTimeout: TimeInterval
@@ -100,6 +106,7 @@ public final class IntegrationServer {
       }
 
       if self.process.isRunning {
+        kill(self.process.processIdentifier, SIGKILL)
         self.process.waitUntilExit()
       }
     }
