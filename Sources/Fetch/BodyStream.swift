@@ -1,6 +1,6 @@
 import _Concurrency
 
-public struct BodyStream: AsyncSequence, Sendable {
+public final class BodyStream: AsyncSequence, @unchecked Sendable {
   public typealias Element = Bytes
   public struct AsyncIterator: AsyncIteratorProtocol {
     private let box: _AnyBodyStreamAsyncIteratorBox
