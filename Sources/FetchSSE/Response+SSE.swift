@@ -1,4 +1,3 @@
-import _Concurrency
 import Fetch
 
 extension Response {
@@ -8,7 +7,7 @@ extension Response {
         do {
           var parser = _SSEParser()
 
-          for try await chunk in self.body {
+          for try await chunk in self.body.asyncBytes() {
             let events = try parser.parse(chunk)
             for event in events {
               continuation.yield(event)

@@ -28,30 +28,22 @@ extension FetchClient {
         if let contentLength = body.contentLength, urlRequest.value(forHTTPHeaderField: "Content-Length") == nil {
           urlRequest.setValue(String(contentLength), forHTTPHeaderField: "Content-Length")
         }
-        urlRequest.httpBody = try await Data(collecting: body.stream)
+        urlRequest.httpBody = try await body.data()
       }
 
       let (data, response) = try await session.data(for: urlRequest)
       guard let response = response as? HTTPURLResponse else {
-        return Response(status: Status(code: 599), body: .chunk(Array(data)))
+        return Response(status: Status(code: 599), body: .bytes(Array(data)))
       }
+
+      let headers = Headers(response)
 
       return Response(
         status: Status(code: response.statusCode),
-        headers: Headers(response),
-        body: .chunk(Array(data))
+        headers: headers,
+        body: .bytes(Array(data), contentType: headers[.contentType])
       )
     }
-  }
-}
-
-private extension Data {
-  init(collecting stream: BodyStream) async throws {
-    var bytes: Bytes = []
-    for try await chunk in stream {
-      bytes.append(contentsOf: chunk)
-    }
-    self = Data(bytes)
   }
 }
 
