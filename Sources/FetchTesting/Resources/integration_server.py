@@ -105,6 +105,37 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             return
 
+        if parsed.path == "/sse-stream":
+            delay = float(parse_qs(parsed.query).get("delay", ["0.75"])[0])
+            events = [
+                (
+                    "event: greeting\n"
+                    "id: 1\n"
+                    "data: first\n"
+                    "\n"
+                ).encode("utf-8"),
+                (
+                    "event: greeting\n"
+                    "id: 2\n"
+                    "data: second\n"
+                    "\n"
+                ).encode("utf-8"),
+            ]
+
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Connection", "close")
+            self.send_header("Content-Length", str(sum(len(event) for event in events)))
+            self.end_headers()
+
+            self.wfile.write(events[0])
+            self.wfile.flush()
+            time.sleep(delay)
+            self.wfile.write(events[1])
+            self.wfile.flush()
+            self.close_connection = True
+            return
+
         self._write_response(404, b"not found")
 
     def log_message(self, format, *args):
