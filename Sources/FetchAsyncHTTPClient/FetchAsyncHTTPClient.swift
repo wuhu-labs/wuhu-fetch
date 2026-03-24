@@ -27,28 +27,22 @@ extension FetchClient {
         }
 
         clientRequest.body = .stream(
-          RequestBodySequence(stream: body.stream),
+          RequestBodySequence(stream: body.asyncBytes()),
           length: body.contentLength.map(HTTPClientRequest.Body.Length.known) ?? .unknown
         )
       }
 
       let response = try await client.execute(clientRequest, timeout: .seconds(30))
+      let headers = Headers(response.headers)
 
       return Response(
         status: Status(code: Int(response.status.code), reasonPhrase: response.status.reasonPhrase),
-        headers: Headers(response.headers),
-        body: BodyStream { continuation in
-          Task {
-            do {
-              for try await buffer in response.body {
-                continuation.yield(Array(buffer.readableBytesView))
-              }
-              continuation.finish()
-            } catch {
-              continuation.finish(throwing: error)
-            }
-          }
-        }
+        headers: headers,
+        body: .stream(
+          length: firstHeaderValue(named: "content-length", in: headers).flatMap(Int64.init),
+          contentType: firstHeaderValue(named: "content-type", in: headers),
+          ResponseBodySequence(base: response.body)
+        )
       )
     }
   }
@@ -76,6 +70,28 @@ private struct RequestBodySequence: AsyncSequence, Sendable {
   }
 }
 
+@available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
+private struct ResponseBodySequence: AsyncSequence, Sendable {
+  typealias Element = Bytes
+
+  let base: HTTPClientResponse.Body
+
+  func makeAsyncIterator() -> Iterator {
+    Iterator(base: self.base.makeAsyncIterator())
+  }
+
+  struct Iterator: AsyncIteratorProtocol {
+    var base: HTTPClientResponse.Body.AsyncIterator
+
+    mutating func next() async throws -> Bytes? {
+      guard let buffer = try await self.base.next() else {
+        return nil
+      }
+      return Array(buffer.readableBytesView)
+    }
+  }
+}
+
 private extension Headers {
   init(_ headers: HTTPHeaders) {
     self.init()
@@ -86,4 +102,11 @@ private extension Headers {
       }
     }
   }
+}
+
+private func firstHeaderValue(named rawName: String, in headers: Headers) -> String? {
+  for field in headers where field.name.rawName.caseInsensitiveCompare(rawName) == .orderedSame {
+    return field.value
+  }
+  return nil
 }

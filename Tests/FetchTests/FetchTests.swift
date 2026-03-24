@@ -11,8 +11,8 @@ import Testing
 
 @Suite struct FetchTests {
   @Test func requestStringBody() async throws {
-    let body = Request.Body.string("hello")
-    let response = Response(status: .ok, body: body.stream)
+    let body = Body.string("hello")
+    let response = Response(status: .ok, body: body)
 
     #expect(body.contentType == "text/plain; charset=utf-8")
     #expect(try await response.text() == "hello")
@@ -23,8 +23,8 @@ import Testing
       var message: String
     }
 
-    let body = try Request.Body.json(Payload(message: "hi"))
-    let response = Response(status: .ok, body: body.stream)
+    let body = try Body.json(Payload(message: "hi"))
+    let response = Response(status: .ok, body: body)
 
     #expect(body.contentType == "application/json")
     #expect(try await response.json(Payload.self) == Payload(message: "hi"))
@@ -79,5 +79,33 @@ import Testing
     }
 
     #expect(try await response.text() == "value")
+  }
+
+  @Test func inMemoryBodiesAreReplayable() async throws {
+    let body = Body.string("hello")
+
+    #expect(body.isReplayable)
+    #expect(try await body.text() == "hello")
+
+    let replay = try #require(body.replay())
+    #expect(try await replay.text() == "hello")
+  }
+
+  @Test func asyncBytesConsumesBodyOnce() async throws {
+    let body = Body.chunk([1, 2, 3])
+
+    var chunks: [Bytes] = []
+    for try await chunk in body.asyncBytes() {
+      chunks.append(chunk)
+    }
+
+    #expect(chunks == [[1, 2, 3]])
+
+    do {
+      _ = try await body.bytes()
+      Issue.record("Expected bodyAlreadyConsumed")
+    } catch let error as FetchError {
+      #expect(error == .bodyAlreadyConsumed)
+    }
   }
 }

@@ -1,68 +1,27 @@
-import _Concurrency
-
 public struct BodyStream: AsyncSequence, Sendable {
   public typealias Element = Bytes
-  public typealias AsyncIterator = AsyncThrowingStream<Element, Error>.Iterator
+  public struct AsyncIterator: AsyncIteratorProtocol {
+    private let storage: BodyStorage
+    private let consumer = _BodyStreamConsumer()
 
-  private let stream: AsyncThrowingStream<Element, Error>
+    fileprivate init(storage: BodyStorage) {
+      self.storage = storage
+    }
 
-  public init(
-    _ build: @escaping @Sendable (AsyncThrowingStream<Element, Error>.Continuation) -> Void
-  ) {
-    self.stream = AsyncThrowingStream(
-      Element.self,
-      bufferingPolicy: .unbounded,
-      build
-    )
+    public mutating func next() async throws -> Element? {
+      try await self.storage.nextChunk(for: ObjectIdentifier(self.consumer))
+    }
   }
 
-  init(stream: AsyncThrowingStream<Element, Error>) {
-    self.stream = stream
+  let storage: BodyStorage
+
+  init(storage: BodyStorage) {
+    self.storage = storage
   }
 
   public func makeAsyncIterator() -> AsyncIterator {
-    self.stream.makeAsyncIterator()
+    AsyncIterator(storage: self.storage)
   }
 }
 
-extension BodyStream {
-  public static var empty: Self {
-    Self { continuation in
-      continuation.finish()
-    }
-  }
-
-  public static func chunk(_ bytes: Bytes) -> Self {
-    Self { continuation in
-      if !bytes.isEmpty {
-        continuation.yield(bytes)
-      }
-      continuation.finish()
-    }
-  }
-
-  public static func chunks(_ chunks: [Bytes]) -> Self {
-    Self { continuation in
-      for chunk in chunks where !chunk.isEmpty {
-        continuation.yield(chunk)
-      }
-      continuation.finish()
-    }
-  }
-
-  public static func stream<S: AsyncSequence & Sendable>(_ sequence: S) -> Self
-  where S.Element == Bytes {
-    Self { continuation in
-      Task {
-        do {
-          for try await chunk in sequence {
-            continuation.yield(chunk)
-          }
-          continuation.finish()
-        } catch {
-          continuation.finish(throwing: error)
-        }
-      }
-    }
-  }
-}
+private final class _BodyStreamConsumer {}
