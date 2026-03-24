@@ -1,8 +1,4 @@
-#if canImport(FoundationEssentials)
-import FoundationEssentials
-#else
 import Foundation
-#endif
 
 public struct IntegrationServerConfiguration: Sendable {
   public var pythonExecutable: String
