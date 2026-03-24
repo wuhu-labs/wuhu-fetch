@@ -80,4 +80,46 @@ import Testing
 
     #expect(try await response.text() == "value")
   }
+
+  @Test func sequenceBackedStreamIsLazy() async throws {
+    let probe = Probe()
+    let body = BodyStream.stream(ProbeSequence(probe: probe))
+
+    #expect(await probe.started == false)
+
+    var iterator = body.makeAsyncIterator()
+    #expect(try await iterator.next() == [1, 2, 3])
+    #expect(await probe.started == true)
+    #expect(try await iterator.next() == nil)
+  }
+}
+
+private actor Probe {
+  var started = false
+
+  func markStarted() {
+    self.started = true
+  }
+}
+
+private struct ProbeSequence: AsyncSequence, Sendable {
+  typealias Element = Bytes
+
+  let probe: Probe
+
+  func makeAsyncIterator() -> Iterator {
+    Iterator(probe: self.probe)
+  }
+
+  struct Iterator: AsyncIteratorProtocol {
+    let probe: Probe
+    var hasYielded = false
+
+    mutating func next() async throws -> Bytes? {
+      guard !self.hasYielded else { return nil }
+      self.hasYielded = true
+      await self.probe.markStarted()
+      return [1, 2, 3]
+    }
+  }
 }
