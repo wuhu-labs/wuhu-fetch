@@ -3,18 +3,18 @@ import _Concurrency
 public struct BodyStream: AsyncSequence, Sendable {
   public typealias Element = Bytes
   public struct AsyncIterator: AsyncIteratorProtocol {
-    private let _next: @Sendable () async throws -> Element?
+    private let box: _AnyBodyStreamAsyncIteratorBox
 
-    init(_ next: @escaping @Sendable () async throws -> Element?) {
-      self._next = next
+    fileprivate init(box: _AnyBodyStreamAsyncIteratorBox) {
+      self.box = box
     }
 
     public mutating func next() async throws -> Element? {
-      try await self._next()
+      try await self.box.next()
     }
   }
 
-  private let makeIterator: @Sendable () -> AsyncIterator
+  private let box: _AnyBodyStreamBox
 
   public init(
     _ build: @escaping @Sendable (AsyncThrowingStream<Element, Error>.Continuation) -> Void
@@ -24,20 +24,15 @@ public struct BodyStream: AsyncSequence, Sendable {
       bufferingPolicy: .unbounded,
       build
     )
-    self.makeIterator = {
-      let iterator = _BodyStreamIteratorBox(base: stream.makeAsyncIterator())
-      return AsyncIterator {
-        try await iterator.next()
-      }
-    }
+    self.box = _StreamBodyStreamBox(stream: stream)
   }
 
-  private init(makeIterator: @escaping @Sendable () -> AsyncIterator) {
-    self.makeIterator = makeIterator
+  private init(box: _AnyBodyStreamBox) {
+    self.box = box
   }
 
   public func makeAsyncIterator() -> AsyncIterator {
-    self.makeIterator()
+    self.box.makeAsyncIterator()
   }
 }
 
@@ -68,18 +63,48 @@ extension BodyStream {
 
   public static func stream<S: AsyncSequence & Sendable>(_ sequence: S) -> Self
   where S.Element == Bytes {
-    Self(
-      makeIterator: {
-        let iterator = _BodyStreamIteratorBox(base: sequence.makeAsyncIterator())
-        return AsyncIterator {
-          try await iterator.next()
-        }
-      }
-    )
+    Self(box: _SequenceBodyStreamBox(sequence: sequence))
   }
 }
 
-private final class _BodyStreamIteratorBox<Base: AsyncIteratorProtocol>: @unchecked Sendable
+private class _AnyBodyStreamBox: @unchecked Sendable {
+  func makeAsyncIterator() -> BodyStream.AsyncIterator {
+    fatalError("Override me")
+  }
+}
+
+private class _AnyBodyStreamAsyncIteratorBox: @unchecked Sendable {
+  func next() async throws -> BodyStream.Element? {
+    fatalError("Override me")
+  }
+}
+
+private final class _StreamBodyStreamBox: _AnyBodyStreamBox {
+  let stream: AsyncThrowingStream<BodyStream.Element, Error>
+
+  init(stream: AsyncThrowingStream<BodyStream.Element, Error>) {
+    self.stream = stream
+  }
+
+  override func makeAsyncIterator() -> BodyStream.AsyncIterator {
+    BodyStream.AsyncIterator(box: _BodyStreamIteratorBox(base: self.stream.makeAsyncIterator()))
+  }
+}
+
+private final class _SequenceBodyStreamBox<S: AsyncSequence & Sendable>: _AnyBodyStreamBox
+where S.Element == BodyStream.Element {
+  let sequence: S
+
+  init(sequence: S) {
+    self.sequence = sequence
+  }
+
+  override func makeAsyncIterator() -> BodyStream.AsyncIterator {
+    BodyStream.AsyncIterator(box: _BodyStreamIteratorBox(base: self.sequence.makeAsyncIterator()))
+  }
+}
+
+private final class _BodyStreamIteratorBox<Base: AsyncIteratorProtocol>: _AnyBodyStreamAsyncIteratorBox
 where Base.Element == BodyStream.Element {
   private var base: Base
 
@@ -87,7 +112,7 @@ where Base.Element == BodyStream.Element {
     self.base = base
   }
 
-  func next() async throws -> BodyStream.Element? {
+  override func next() async throws -> BodyStream.Element? {
     try await self.base.next()
   }
 }
