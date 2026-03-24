@@ -84,7 +84,24 @@ public final class IntegrationServer {
   public func stop() {
     if self.process.isRunning {
       self.process.terminate()
-      self.process.waitUntilExit()
+
+      let deadline = Date().addingTimeInterval(1)
+      while self.process.isRunning, Date() < deadline {
+        Thread.sleep(forTimeInterval: 0.05)
+      }
+
+      if self.process.isRunning {
+        self.process.interrupt()
+      }
+
+      let interruptDeadline = Date().addingTimeInterval(1)
+      while self.process.isRunning, Date() < interruptDeadline {
+        Thread.sleep(forTimeInterval: 0.05)
+      }
+
+      if self.process.isRunning {
+        self.process.waitUntilExit()
+      }
     }
     try? FileManager.default.removeItem(at: self.portFileURL)
   }

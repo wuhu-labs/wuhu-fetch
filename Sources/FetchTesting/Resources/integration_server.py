@@ -35,9 +35,11 @@ class Handler(BaseHTTPRequestHandler):
     def _write_response(self, status_code, body, content_type="text/plain; charset=utf-8"):
         self.send_response(status_code)
         self.send_header("Content-Type", content_type)
+        self.send_header("Connection", "close")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+        self.close_connection = True
 
     def _handle(self):
         parsed = urlparse(self.path)
@@ -72,6 +74,7 @@ class Handler(BaseHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Connection", "close")
             self.send_header("Content-Length", str(sum(len(chunk) for chunk in chunks)))
             self.end_headers()
 
@@ -79,6 +82,7 @@ class Handler(BaseHTTPRequestHandler):
               self.wfile.write(chunk)
               self.wfile.flush()
               time.sleep(delay)
+            self.close_connection = True
             return
 
         self._write_response(404, b"not found")
