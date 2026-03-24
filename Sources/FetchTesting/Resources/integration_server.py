@@ -85,6 +85,26 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             return
 
+        if parsed.path == "/sse":
+            body = (
+                "event: greeting\n"
+                "id: 42\n"
+                "retry: 1500\n"
+                "data: hello\n"
+                "data: world\n"
+                "\n"
+            ).encode("utf-8")
+
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Connection", "close")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            self.wfile.flush()
+            self.close_connection = True
+            return
+
         self._write_response(404, b"not found")
 
     def log_message(self, format, *args):
