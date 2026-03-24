@@ -32,8 +32,8 @@ extension FetchClient {
       }
 
       #if canImport(FoundationNetworking)
-      return try await streamingResponse(
-        configuration: session.configuration,
+      return try await bufferedResponse(
+        using: session,
         request: urlRequest
       )
       #else
@@ -53,6 +53,54 @@ extension FetchClient {
   }
 }
 
+private func bufferedResponse(
+  using session: URLSession,
+  request: URLRequest
+) async throws -> Response {
+  let (data, urlResponse) = try await session.data(for: request)
+
+  return makeResponse(
+    from: urlResponse,
+    body: .bytes(Array(data), contentType: headerValue(named: "Content-Type", in: urlResponse))
+  )
+}
+
+private func makeResponse(from urlResponse: URLResponse, body: Body) -> Response {
+  guard let response = urlResponse as? HTTPURLResponse else {
+    return Response(status: Status(code: 599), body: body)
+  }
+
+  let headers = Headers(response)
+
+  return Response(
+    status: Status(code: response.statusCode),
+    headers: headers,
+    body: body
+  )
+}
+
+private extension Headers {
+  init(_ response: HTTPURLResponse) {
+    self.init()
+
+    for (name, value) in response.allHeaderFields {
+      guard
+        let name = String(describing: name).split(separator: "\n").first,
+        let fieldName = HTTPField.Name(String(name))
+      else {
+        continue
+      }
+
+      self[fieldName] = String(describing: value)
+    }
+  }
+}
+
+private func headerValue(named field: String, in response: URLResponse) -> String? {
+  (response as? HTTPURLResponse)?.value(forHTTPHeaderField: field)
+}
+
+#if !canImport(FoundationNetworking)
 @available(macOS 12, iOS 15, tvOS 15, watchOS 8, *)
 private func streamingResponse(
   using session: URLSession,
@@ -92,20 +140,6 @@ private func streamingResponse(
       contentType: headerValue(named: "Content-Type", in: urlResponse),
       SessionBoundSequence(session: session, base: delegate.body)
     )
-  )
-}
-
-private func makeResponse(from urlResponse: URLResponse, body: Body) -> Response {
-  guard let response = urlResponse as? HTTPURLResponse else {
-    return Response(status: Status(code: 599), body: body)
-  }
-
-  let headers = Headers(response)
-
-  return Response(
-    status: Status(code: response.statusCode),
-    headers: headers,
-    body: body
   )
 }
 
@@ -239,24 +273,4 @@ private final class LockedState: @unchecked Sendable {
     return operation(self)
   }
 }
-
-private extension Headers {
-  init(_ response: HTTPURLResponse) {
-    self.init()
-
-    for (name, value) in response.allHeaderFields {
-      guard
-        let name = String(describing: name).split(separator: "\n").first,
-        let fieldName = HTTPField.Name(String(name))
-      else {
-        continue
-      }
-
-      self[fieldName] = String(describing: value)
-    }
-  }
-}
-
-private func headerValue(named field: String, in response: URLResponse) -> String? {
-  (response as? HTTPURLResponse)?.value(forHTTPHeaderField: field)
-}
+#endif
