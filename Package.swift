@@ -16,6 +16,10 @@ let package = Package(
       targets: ["Fetch"]
     ),
     .library(
+      name: "FetchSSE",
+      targets: ["FetchSSE"]
+    ),
+    .library(
       name: "FetchTesting",
       targets: ["FetchTesting"]
     ),
@@ -33,6 +37,12 @@ let package = Package(
       ]
     ),
     .target(
+      name: "FetchSSE",
+      dependencies: [
+        "Fetch",
+      ]
+    ),
+    .target(
       name: "FetchTesting",
       dependencies: [
         "Fetch",
@@ -45,6 +55,7 @@ let package = Package(
       name: "FetchTests",
       dependencies: [
         "Fetch",
+        "FetchSSE",
         "FetchTesting",
         .product(name: "DependenciesTestSupport", package: "swift-dependencies"),
       ]
