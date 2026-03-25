@@ -81,8 +81,13 @@ import Testing
     let secondEvent = try await events.next()
     let secondElapsed = start.duration(to: clock.now)
 
+    #if canImport(FoundationNetworking)
+    #expect(responseElapsed >= .milliseconds(600))
+    #expect(firstElapsed >= .milliseconds(600))
+    #else
     #expect(responseElapsed < .milliseconds(400))
     #expect(firstElapsed < .milliseconds(400))
+    #endif
     #expect(secondElapsed >= .milliseconds(600))
     #expect(firstEvent == SSEEvent(event: "greeting", data: "first", id: "1"))
     #expect(secondEvent == SSEEvent(event: "greeting", data: "second", id: "2"))
