@@ -90,6 +90,7 @@ let package = Package(
       dependencies: [
         "FetchURLSession",
         "Fetch",
+        "FetchSSE",
         "FetchTesting",
       ]
     ),
