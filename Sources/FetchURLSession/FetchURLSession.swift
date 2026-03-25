@@ -11,6 +11,18 @@ import FoundationNetworking
 import Fetch
 import HTTPTypes
 
+#if canImport(FoundationNetworking)
+extension FetchClient {
+  @available(
+    *,
+    unavailable,
+    message: "FetchURLSession is only available on Apple platforms. Use FetchClient.asyncHTTPClient(_:) for cross-platform streaming."
+  )
+  public static func urlSession(_ session: URLSession = .shared) -> Self {
+    fatalError("Unavailable")
+  }
+}
+#else
 extension FetchClient {
   public static func urlSession(_ session: URLSession = .shared) -> Self {
     Self { request in
@@ -31,12 +43,6 @@ extension FetchClient {
         urlRequest.httpBody = try await body.data()
       }
 
-      #if canImport(FoundationNetworking)
-      return try await bufferedResponse(
-        using: session,
-        request: urlRequest
-      )
-      #else
       if #available(macOS 12, iOS 15, tvOS 15, watchOS 8, *) {
         return try await streamingResponse(
           using: session,
@@ -48,21 +54,8 @@ extension FetchClient {
           request: urlRequest
         )
       }
-      #endif
     }
   }
-}
-
-private func bufferedResponse(
-  using session: URLSession,
-  request: URLRequest
-) async throws -> Response {
-  let (data, urlResponse) = try await session.data(for: request)
-
-  return makeResponse(
-    from: urlResponse,
-    body: .bytes(Array(data), contentType: headerValue(named: "Content-Type", in: urlResponse))
-  )
 }
 
 private func makeResponse(from urlResponse: URLResponse, body: Body) -> Response {
@@ -100,7 +93,6 @@ private func headerValue(named field: String, in response: URLResponse) -> Strin
   (response as? HTTPURLResponse)?.value(forHTTPHeaderField: field)
 }
 
-#if !canImport(FoundationNetworking)
 @available(macOS 12, iOS 15, tvOS 15, watchOS 8, *)
 private func streamingResponse(
   using session: URLSession,

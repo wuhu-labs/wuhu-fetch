@@ -4,10 +4,7 @@ import FoundationEssentials
 import Foundation
 #endif
 
-#if canImport(FoundationNetworking)
-import FoundationNetworking
-#endif
-
+#if !canImport(FoundationNetworking)
 import Fetch
 import FetchSSE
 import FetchTesting
@@ -107,3 +104,4 @@ private struct EchoPayload: Decodable {
     }?.value
   }
 }
+#endif
