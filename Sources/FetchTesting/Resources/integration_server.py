@@ -3,9 +3,32 @@
 import argparse
 import json
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
+
+
+gated_sse_events = {}
+gated_sse_events_lock = threading.Lock()
+
+
+def gated_sse_event(identifier):
+    with gated_sse_events_lock:
+        event = gated_sse_events.get(identifier)
+        if event is None:
+            event = threading.Event()
+            gated_sse_events[identifier] = event
+        return event
+
+
+def release_gated_sse_event(identifier):
+    with gated_sse_events_lock:
+        event = gated_sse_events.get(identifier)
+        if event is None:
+            event = threading.Event()
+            gated_sse_events[identifier] = event
+        event.set()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -103,6 +126,49 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             self.wfile.flush()
             self.close_connection = True
+            return
+
+        if parsed.path == "/sse-gated":
+            identifier = parse_qs(parsed.query).get("id", [""])[0]
+            event = gated_sse_event(identifier)
+
+            first = (
+                "event: greeting\n"
+                "id: 1\n"
+                "data: first\n"
+                "\n"
+            ).encode("utf-8")
+            second = (
+                "event: greeting\n"
+                "id: 2\n"
+                "data: second\n"
+                "\n"
+            ).encode("utf-8")
+            timeout = (
+                "event: error\n"
+                "data: timed out waiting for release\n"
+                "\n"
+            ).encode("utf-8")
+
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Connection", "close")
+            self.end_headers()
+
+            self.wfile.write(first)
+            self.wfile.flush()
+            if event.wait(timeout=10):
+                self.wfile.write(second)
+            else:
+                self.wfile.write(timeout)
+            self.wfile.flush()
+            self.close_connection = True
+            return
+
+        if parsed.path == "/release-sse":
+            identifier = parse_qs(parsed.query).get("id", [""])[0]
+            release_gated_sse_event(identifier)
+            self._write_response(200, b"released")
             return
 
         if parsed.path == "/sse-stream":
