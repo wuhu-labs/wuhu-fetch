@@ -1,10 +1,9 @@
-#if canImport(FoundationEssentials)
-import FoundationEssentials
-#else
 import Foundation
+
+#if canImport(FoundationNetworking)
+import FoundationNetworking
 #endif
 
-#if !canImport(FoundationNetworking)
 import Fetch
 import FetchSSE
 import FetchTesting
@@ -78,17 +77,40 @@ import Testing
     let secondEvent = try await events.next()
     let secondElapsed = start.duration(to: clock.now)
 
-    #if canImport(FoundationNetworking)
-    #expect(responseElapsed >= .milliseconds(600))
-    #expect(firstElapsed >= .milliseconds(600))
-    #else
     #expect(responseElapsed < .milliseconds(400))
     #expect(firstElapsed < .milliseconds(400))
-    #endif
     #expect(secondElapsed >= .milliseconds(600))
     #expect(firstEvent == SSEEvent(event: "greeting", data: "first", id: "1"))
     #expect(secondEvent == SSEEvent(event: "greeting", data: "second", id: "2"))
     #expect(try await events.next() == nil)
+  }
+
+  @Test func reusesClientForConcurrentRequests() async throws {
+    let server = try IntegrationServer.start()
+    defer { server.stop() }
+
+    let fetch = FetchClient.urlSession(URLSession(configuration: .ephemeral))
+    let baseURL = server.baseURL
+
+    let statuses = try await withThrowingTaskGroup(of: Int.self) { group in
+      for status in [200, 201, 202, 418] {
+        group.addTask {
+          let response = try await fetch(
+            Request(url: baseURL.appendingPathComponent("status/\(status)"))
+          )
+          #expect(try await response.text() == "status:\(status)")
+          return response.status.code
+        }
+      }
+
+      var statuses: [Int] = []
+      for try await status in group {
+        statuses.append(status)
+      }
+      return statuses.sorted()
+    }
+
+    #expect(statuses == [200, 201, 202, 418])
   }
 }
 
@@ -104,4 +126,3 @@ private struct EchoPayload: Decodable {
     }?.value
   }
 }
-#endif

@@ -1,8 +1,4 @@
-#if canImport(FoundationEssentials)
-import FoundationEssentials
-#else
 import Foundation
-#endif
 
 #if canImport(FoundationNetworking)
 import FoundationNetworking
@@ -11,49 +7,76 @@ import FoundationNetworking
 import Fetch
 import HTTPTypes
 
-#if canImport(FoundationNetworking)
 extension FetchClient {
-  @available(
-    *,
-    unavailable,
-    message: "FetchURLSession is only available on Apple platforms. Use FetchClient.asyncHTTPClient(_:) for cross-platform streaming."
-  )
   public static func urlSession(_ session: URLSession = .shared) -> Self {
-    fatalError("Unavailable")
+    let transport = URLSessionFetchTransport(configuration: session.configuration)
+
+    return Self { request in
+      try await transport.fetch(request)
+    }
   }
 }
-#else
-extension FetchClient {
-  public static func urlSession(_ session: URLSession = .shared) -> Self {
-    Self { request in
-      var urlRequest = URLRequest(url: request.url)
-      urlRequest.httpMethod = request.method.rawValue
 
-      for field in request.headers {
-        urlRequest.addValue(field.value, forHTTPHeaderField: field.name.rawName)
+private final class URLSessionFetchTransport: @unchecked Sendable {
+  private let delegate = StreamingURLSessionDelegate()
+  private let session: URLSession
+
+  init(configuration: URLSessionConfiguration) {
+    self.session = URLSession(
+      configuration: configuration,
+      delegate: self.delegate,
+      delegateQueue: nil
+    )
+  }
+
+  deinit {
+    self.session.invalidateAndCancel()
+  }
+
+  func fetch(_ request: Request) async throws -> Response {
+    var urlRequest = URLRequest(url: request.url)
+    urlRequest.httpMethod = request.method.rawValue
+
+    for field in request.headers {
+      urlRequest.addValue(field.value, forHTTPHeaderField: field.name.rawName)
+    }
+
+    if let body = request.body {
+      if let contentType = body.contentType, urlRequest.value(forHTTPHeaderField: "Content-Type") == nil {
+        urlRequest.setValue(contentType, forHTTPHeaderField: "Content-Type")
+      }
+      if let contentLength = body.contentLength, urlRequest.value(forHTTPHeaderField: "Content-Length") == nil {
+        urlRequest.setValue(String(contentLength), forHTTPHeaderField: "Content-Length")
+      }
+      urlRequest.httpBody = try await body.data()
+    }
+
+    let state = StreamingTaskState()
+    let task = self.session.dataTask(with: urlRequest)
+    state.attach(task: task) { [delegate = self.delegate] taskIdentifier in
+      delegate.unregisterTask(withIdentifier: taskIdentifier)
+    }
+    self.delegate.register(state, for: task)
+    task.resume()
+
+    do {
+      let urlResponse = try await withTaskCancellationHandler {
+        try await state.waitForResponse()
+      } onCancel: {
+        state.cancel()
       }
 
-      if let body = request.body {
-        if let contentType = body.contentType, urlRequest.value(forHTTPHeaderField: "Content-Type") == nil {
-          urlRequest.setValue(contentType, forHTTPHeaderField: "Content-Type")
-        }
-        if let contentLength = body.contentLength, urlRequest.value(forHTTPHeaderField: "Content-Length") == nil {
-          urlRequest.setValue(String(contentLength), forHTTPHeaderField: "Content-Length")
-        }
-        urlRequest.httpBody = try await body.data()
-      }
-
-      if #available(macOS 12, iOS 15, tvOS 15, watchOS 8, *) {
-        return try await streamingResponse(
-          using: session,
-          request: urlRequest
+      return makeResponse(
+        from: urlResponse,
+        body: .stream(
+          length: urlResponse.expectedContentLength >= 0 ? urlResponse.expectedContentLength : nil,
+          contentType: headerValue(named: "Content-Type", in: urlResponse),
+          TransportBoundSequence(transport: self, base: state.body)
         )
-      } else {
-        return try await streamingResponse(
-          configuration: session.configuration,
-          request: urlRequest
-        )
-      }
+      )
+    } catch {
+      state.cancel()
+      throw error
     }
   }
 }
@@ -93,118 +116,41 @@ private func headerValue(named field: String, in response: URLResponse) -> Strin
   (response as? HTTPURLResponse)?.value(forHTTPHeaderField: field)
 }
 
-@available(macOS 12, iOS 15, tvOS 15, watchOS 8, *)
-private func streamingResponse(
-  using session: URLSession,
-  request: URLRequest
-) async throws -> Response {
-  let (bytes, urlResponse) = try await session.bytes(for: request)
-
-  return makeResponse(
-    from: urlResponse,
-    body: .stream(
-      length: urlResponse.expectedContentLength >= 0 ? urlResponse.expectedContentLength : nil,
-      contentType: headerValue(named: "Content-Type", in: urlResponse),
-      ByteSequence(base: bytes)
-    )
-  )
-}
-
-private func streamingResponse(
-  configuration: URLSessionConfiguration,
-  request: URLRequest
-) async throws -> Response {
-  let delegate = StreamingTaskDelegate()
-  let session = URLSession(
-    configuration: configuration,
-    delegate: delegate,
-    delegateQueue: nil
-  )
-  let task = session.dataTask(with: request)
-  task.resume()
-
-  let urlResponse = try await delegate.waitForResponse()
-
-  return makeResponse(
-    from: urlResponse,
-    body: .stream(
-      length: urlResponse.expectedContentLength >= 0 ? urlResponse.expectedContentLength : nil,
-      contentType: headerValue(named: "Content-Type", in: urlResponse),
-      SessionBoundSequence(session: session, base: delegate.body)
-    )
-  )
-}
-
-private struct ByteSequence<Base: AsyncSequence & Sendable>: AsyncSequence, Sendable
-where Base.Element == UInt8 {
-  typealias Element = Bytes
-
-  let base: Base
-
-  func makeAsyncIterator() -> Iterator {
-    Iterator(base: self.base.makeAsyncIterator())
-  }
-
-  struct Iterator: AsyncIteratorProtocol {
-    var base: Base.AsyncIterator
-
-    mutating func next() async throws -> Bytes? {
-      guard let byte = try await self.base.next() else {
-        return nil
-      }
-      return [byte]
-    }
-  }
-}
-
-private struct SessionBoundSequence<Base: AsyncSequence & Sendable>: AsyncSequence, Sendable
+private struct TransportBoundSequence<Base: AsyncSequence & Sendable>: AsyncSequence, Sendable
 where Base.Element == Bytes {
   typealias Element = Bytes
 
-  let session: URLSession
+  let transport: URLSessionFetchTransport
   let base: Base
 
   func makeAsyncIterator() -> Iterator {
-    Iterator(session: self.session, base: self.base.makeAsyncIterator())
+    Iterator(transport: self.transport, base: self.base.makeAsyncIterator())
   }
 
   struct Iterator: AsyncIteratorProtocol {
-    let session: URLSession
+    let transport: URLSessionFetchTransport
     var base: Base.AsyncIterator
 
     mutating func next() async throws -> Bytes? {
-      _ = self.session
+      _ = self.transport
       return try await self.base.next()
     }
   }
 }
 
-private final class StreamingTaskDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
-  let body: AsyncThrowingStream<Bytes, Error>
+private final class StreamingURLSessionDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+  private var tasks: [Int: StreamingTaskState] = [:]
+  private let lock = NSLock()
 
-  private let state = LockedState()
-
-  override init() {
-    var continuation: AsyncThrowingStream<Bytes, Error>.Continuation!
-    self.body = AsyncThrowingStream { continuation = $0 }
-    self.state.bodyContinuation = continuation
+  func register(_ state: StreamingTaskState, for task: URLSessionTask) {
+    self.withLock {
+      $0.tasks[task.taskIdentifier] = state
+    }
   }
 
-  func waitForResponse() async throws -> URLResponse {
-    try await withCheckedThrowingContinuation { continuation in
-      self.state.withLock {
-        if let response = $0.response {
-          continuation.resume(returning: response)
-          return
-        }
-
-        if let error = $0.error {
-          continuation.resume(throwing: error)
-          return
-        }
-
-        $0.responseContinuation = continuation
-      }
+  func unregisterTask(withIdentifier taskIdentifier: Int) {
+    self.withLock {
+      $0.tasks[taskIdentifier] = nil
     }
   }
 
@@ -214,55 +160,176 @@ private final class StreamingTaskDelegate: NSObject, URLSessionDataDelegate, @un
     didReceive response: URLResponse,
     completionHandler: @escaping @Sendable (URLSession.ResponseDisposition) -> Void
   ) {
-    self.state.withLock {
-      $0.response = response
-      $0.responseContinuation?.resume(returning: response)
-      $0.responseContinuation = nil
-    }
+    self.state(for: dataTask)?.receive(response: response)
     completionHandler(.allow)
   }
 
   func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-    _ = self.state.withLock {
-      $0.bodyContinuation?.yield(Array(data))
-    }
+    self.state(for: dataTask)?.receive(data: data)
   }
 
   func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-    self.state.withLock {
-      if let error {
-        if let responseContinuation = $0.responseContinuation {
-          responseContinuation.resume(throwing: error)
-          $0.responseContinuation = nil
-        } else {
-          $0.bodyContinuation?.finish(throwing: error)
-        }
-        $0.error = error
-      } else {
-        if let responseContinuation = $0.responseContinuation {
-          responseContinuation.resume(throwing: URLError(.badServerResponse))
-          $0.responseContinuation = nil
-        }
-        $0.bodyContinuation?.finish()
-      }
-      $0.bodyContinuation = nil
-    }
-    session.finishTasksAndInvalidate()
+    self.state(for: task)?.complete(error: error)
   }
-}
 
-private final class LockedState: @unchecked Sendable {
-  var response: URLResponse?
-  var error: Error?
-  var responseContinuation: CheckedContinuation<URLResponse, Error>?
-  var bodyContinuation: AsyncThrowingStream<Bytes, Error>.Continuation?
+  private func state(for task: URLSessionTask) -> StreamingTaskState? {
+    self.withLock {
+      $0.tasks[task.taskIdentifier]
+    }
+  }
 
-  private let lock = NSLock()
-
-  func withLock<R>(_ operation: (LockedState) -> R) -> R {
+  private func withLock<R>(_ operation: (StreamingURLSessionDelegate) -> R) -> R {
     self.lock.lock()
     defer { self.lock.unlock() }
     return operation(self)
   }
 }
-#endif
+
+private final class StreamingTaskState: @unchecked Sendable {
+  let body: AsyncThrowingStream<Bytes, Error>
+
+  private var task: URLSessionTask?
+  private var taskIdentifier: Int?
+  private var unregisterTask: (@Sendable (Int) -> Void)?
+  private var response: URLResponse?
+  private var terminalError: Error?
+  private var responseContinuation: CheckedContinuation<URLResponse, Error>?
+  private var bodyContinuation: AsyncThrowingStream<Bytes, Error>.Continuation?
+  private var isFinished = false
+  private let lock = NSLock()
+
+  init() {
+    var continuation: AsyncThrowingStream<Bytes, Error>.Continuation!
+    self.body = AsyncThrowingStream { continuation = $0 }
+    self.bodyContinuation = continuation
+    continuation.onTermination = { [weak self] _ in
+      self?.cancel()
+    }
+  }
+
+  func attach(
+    task: URLSessionTask,
+    unregisterTask: @escaping @Sendable (Int) -> Void
+  ) {
+    self.withLock {
+      $0.task = task
+      $0.taskIdentifier = task.taskIdentifier
+      $0.unregisterTask = unregisterTask
+    }
+  }
+
+  func waitForResponse() async throws -> URLResponse {
+    try await withCheckedThrowingContinuation { continuation in
+      self.withLock {
+        if let response = $0.response {
+          continuation.resume(returning: response)
+          return
+        }
+
+        if $0.isFinished {
+          continuation.resume(throwing: $0.terminalError ?? URLError(.badServerResponse))
+          return
+        }
+
+        $0.responseContinuation = continuation
+      }
+    }
+  }
+
+  func receive(response: URLResponse) {
+    let responseContinuation = self.withLock { state in
+      guard !state.isFinished else {
+        return nil as CheckedContinuation<URLResponse, Error>?
+      }
+
+      state.response = response
+      defer { state.responseContinuation = nil }
+      return state.responseContinuation
+    }
+
+    responseContinuation?.resume(returning: response)
+  }
+
+  func receive(data: Data) {
+    let bodyContinuation = self.withLock { state in
+      state.isFinished ? nil : state.bodyContinuation
+    }
+
+    bodyContinuation?.yield(Array(data))
+  }
+
+  func complete(error: Error?) {
+    let continuations = self.finish(error: error)
+
+    if let responseContinuation = continuations.response {
+      responseContinuation.resume(throwing: error ?? URLError(.badServerResponse))
+    }
+
+    if let bodyContinuation = continuations.body {
+      if let error {
+        bodyContinuation.finish(throwing: error)
+      } else {
+        bodyContinuation.finish()
+      }
+    }
+
+    continuations.unregisterTask?()
+  }
+
+  func cancel() {
+    let taskAndContinuations = self.finish(error: CancellationError())
+    taskAndContinuations.task?.cancel()
+
+    if let responseContinuation = taskAndContinuations.response {
+      responseContinuation.resume(throwing: CancellationError())
+    }
+
+    taskAndContinuations.body?.finish(throwing: CancellationError())
+    taskAndContinuations.unregisterTask?()
+  }
+
+  private func finish(
+    error: Error?
+  ) -> (
+    task: URLSessionTask?,
+    response: CheckedContinuation<URLResponse, Error>?,
+    body: AsyncThrowingStream<Bytes, Error>.Continuation?,
+    unregisterTask: (() -> Void)?
+  ) {
+    self.withLock { state in
+      guard !state.isFinished else {
+        return (nil, nil, nil, nil)
+      }
+
+      state.isFinished = true
+      state.terminalError = error
+
+      let responseContinuation = state.responseContinuation
+      let bodyContinuation = state.bodyContinuation
+      let task = state.task
+      let taskIdentifier = state.taskIdentifier
+      let unregisterTask = state.unregisterTask
+
+      state.responseContinuation = nil
+      state.bodyContinuation = nil
+      state.task = nil
+      state.taskIdentifier = nil
+      state.unregisterTask = nil
+
+      return (
+        task,
+        responseContinuation,
+        bodyContinuation,
+        taskIdentifier.map { taskIdentifier in
+          { unregisterTask?(taskIdentifier) }
+        }
+      )
+    }
+  }
+
+  private func withLock<R>(_ operation: (StreamingTaskState) -> R) -> R {
+    self.lock.lock()
+    defer { self.lock.unlock() }
+    return operation(self)
+  }
+}
